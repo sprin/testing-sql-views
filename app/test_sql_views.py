@@ -29,141 +29,148 @@ def setup_module():
     with open(sql_module) as f:
         engines.testing_engine.execute(f.read())
 
-def get_test_fixture1():
-    return {
-      'account': [
-        {
-          'name': 'antonioni',
-          'project': [
-            {'name': 'l''avventura', 'time_start': '1960-10-19 23:59:33+00'},
-            {'name': 'la notte', 'time_start': '1961-10-19 23:59:33+00'},
-            {'name': 'l''eclisse', 'time_start': '1962-10-19 23:59:33+00'},
-          ],
-          'member': [
-              {'name': 'vitti'},
-              {'name': 'mastroianni'},
-          ],
-        },
-        {
-          'name': 'fellini',
-          'project': [
-            {'name': 'la dulce vita', 'time_start': '1960-10-19 23:59:33+00'},
-            {'name': 'otto e mezzo', 'time_start': '1963-10-19 23:59:33+00'},
-          ],
-          'member': [
-              {'name': 'masina'},
-          ],
-        }
-      ]
-    }
-
-def get_test_fixture2():
-    return {
-      'person': [
-        {'name': 'antonioni'},
-        {'name': 'vitti'},
+test_fixture1 = {
+  'account': [
+    {
+      'name': 'antonioni',
+      'project': [
+        {'name': 'l''avventura', 'time_start': '1960-10-19 23:59:33+00'},
+        {'name': 'la notte', 'time_start': '1961-10-19 23:59:33+00'},
+        {'name': 'l''eclisse', 'time_start': '1962-10-19 23:59:33+00'},
       ],
-      'relation': [
-        {
-          'person1': 'vitti',
-          'person2': 'antonioni',
-          'nature_relation': 'love',
-        },
-      ]
+      'member': [
+          {'name': 'vitti'},
+          {'name': 'mastroianni'},
+      ],
+    },
+    {
+      'name': 'fellini',
+      'project': [
+        {'name': 'la dulce vita', 'time_start': '1960-10-19 23:59:33+00'},
+        {'name': 'otto e mezzo', 'time_start': '1963-10-19 23:59:33+00'},
+      ],
+      'member': [
+          {'name': 'masina'},
+      ],
     }
+  ]
+}
+
+test_fixture2 = {
+  'person': [
+    {'name': 'antonioni'},
+    {'name': 'vitti'},
+  ],
+  'relation': [
+    {
+      'person1': 'vitti',
+      'person2': 'antonioni',
+      'nature_relation': 'love',
+    },
+  ]
+}
 
 
-def partition_own_properties_and_children(dict_):
-    own_properties = {}
+def partition_own_attrs_and_children(dict_):
+    own_attrs = {}
     children = {}
     for k, v in dict_.items():
         if isinstance(v, list):
             children[k] = v
         else:
-            own_properties[k] = v
-    return own_properties, children
+            own_attrs[k] = v
+    return own_attrs, children
 
-def construct_inserts_for_fixture(fixture):
-    for tablename, objs in fixture.items():
-        return construct_insert_with_children(
-            tablename,
-            objs,
-        )
 
 def cast_from_pg_type(column, value, cur):
     return tables.typecasters[str(column.type)](value, cur)
+
+def get_pg_type_values_tup(obj, table_obj, cur):
+    pg_type_values = []
+    for k, v in obj.items():
+        column = table_obj.columns[k]
+        pg_type_values.append(cast_from_pg_type(column, v, cur))
+    return tuple(pg_type_values)
+
+def get_insert_context(objs, table_obj, cur):
+    """
+    Get the INSERT context for a single set of objects in the same table_obj,
+    assuming they only have attributes referring to their own table_obj.
+    """
+    cols = objs[0].keys()
+    values = []
+    for obj in objs:
+        values.append(get_pg_type_values_tup(obj, table_obj, cur))
+        pk = [x.name for x in table_obj.primary_key]
+    return {
+        'tablename': table_obj.name,
+        'values_cols': cols,
+        'values': values,
+        'pk': pk,
+    }
+
+def mogrify(args, cur):
+    markers = '\n,'.join(['%s'] * len(args))
+    return cur.mogrify(markers, args)
+
+def construct_inserts_for_fixture(fixture):
+    for tablename, objs in fixture.items():
+        return construct_insert_str_with_children(
+            tablename,
+            objs,
+        )
 
 INSERT_WITH_CHILDREN_TMPL = mako.template.Template(
     open('templates/insert_with_children.sql').read(),
     strict_undefined=True,
 )
 
-def construct_insert_with_children(tablename, objs):
-    # Annoyingly, mogrify is only available from a cursor instance.
+def construct_insert_str_with_children(tablename, objs):
+    # We need a cursor in order to type-cast and mogrify.
     cur = engines.testing_engine.raw_connection().cursor()
+    ctx = get_insert_ctx_with_children(tablename, objs, cur)
+    ctx.update({
+        'comma_join': lambda x: ','.join(x),
+        'mogrify': lambda x: mogrify(x, cur)
+    })
+    return INSERT_WITH_CHILDREN_TMPL.render(**ctx)
+
+def get_insert_ctx_with_children(tablename, objs, cur):
 
     parent_table = tables.metadata.tables[tablename]
 
     parents = []
     for obj in objs:
-        obj, children = partition_own_properties_and_children(obj)
-        parent_cols = obj.keys()
 
-        for k, v in obj.items():
-            column = parent_table.columns[k]
-            obj[k] = cast_from_pg_type(column, v, cur)
+        # We split the obj dict into the objects own attributes,
+        # and it's lists of child objects.
+        obj, children = partition_own_attrs_and_children(obj)
 
-        parent_pk = [x.name for x in parent_table.primary_key]
-        parent_values = [tuple(obj.values())]
+        parent_ctx = get_insert_context([obj], parent_table, cur)
+        parent_pk = parent_ctx['pk']
 
         all_children = []
-        for tablename, objs in children.items():
-            child_table = tablename
-            table = tables.metadata.tables[tablename]
+        for child_tablename, objs in children.items():
+            child_table = tables.metadata.tables[child_tablename]
 
-            ## Construct the VALUES CTE
-            cte_cols = objs[0].keys()
+            ## Construct context for VALUES CTE
+            child_ctx = get_insert_context(objs, child_table, cur)
 
-            # Cast types
-            for obj in objs:
-                for k, v in obj.items():
-                    column = table.columns[k]
-                    obj[k] = cast_from_pg_type(column, v, cur)
-            cte_values = [tuple(x.values()) for x in objs]
+            # The INSERT statement joins on the VALUES CTE and
+            # the parent table. We need to add the parent PK to the col list.
+            child_ctx['insert_cols'] = (
+                tuple(parent_pk + child_ctx['values_cols']))
 
-            # Construct the INSERT INTO from sub-select
-            child_cols = tuple(parent_pk + cte_cols)
-            child_ctx = {
-                'child_table': child_table,
-                'child_cols': child_cols,
-                'cte_cols': cte_cols,
-                'cte_values': cte_values,
-            }
             all_children.append(child_ctx)
 
-        def mogrify(args):
-            markers = '\n,'.join(['%s'] * len(args))
-            return cur.mogrify(markers, args)
+        parent_ctx['all_children'] = all_children
 
-        parents.append({
-            'parent_table': parent_table,
-            'parent_cols': parent_cols,
-            'parent_values': parent_values,
-            'parent_pk': parent_pk,
-            'all_children': all_children,
-        })
+        parents.append(parent_ctx)
 
-    ctx = {
-        'parents': parents,
-        'comma_join': lambda x: ','.join(x),
-        'mogrify': mogrify,
-    }
-    insert_with_children = INSERT_WITH_CHILDREN_TMPL.render(**ctx)
-
-    return insert_with_children
+    return {'parents': parents}
 
 def test_m2m_insert():
-    fix = get_test_fixture2()
+    fix = test_fixture2
     intersections = fix['relation']
     table = tables.metadata.tables['relation']
     for intersection in intersections:
@@ -192,7 +199,7 @@ def test_m2m_insert():
 
 def insert_account_with_projects(conn):
         conn.execute(
-            construct_inserts_for_fixture(get_test_fixture1()))
+            construct_inserts_for_fixture(test_fixture1))
 
 def test_insert():
     with engines.testing_engine.connect() as conn:
