@@ -8,4 +8,5 @@ SELECT
 		WHERE p.account_id = a.account_id
 	) latest_project_time
 FROM account a
+ORDER BY latest_project_time DESC
 ;

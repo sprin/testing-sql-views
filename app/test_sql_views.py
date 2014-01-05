@@ -45,6 +45,13 @@ def get_test_fixture():
             {'project_name': 'la notte', 'time_start': '1961-10-19 23:59:33+00'},
             {'project_name': 'l''eclisse', 'time_start': '1962-10-19 23:59:33+00'},
           ]
+        },
+        {
+          'account_name': 'fellini',
+          'project': [
+            {'project_name': 'la dulce vita', 'time_start': '1960-10-19 23:59:33+00'},
+            {'project_name': 'otto e mezzo', 'time_start': '1963-10-19 23:59:33+00'},
+          ]
         }
       ]
     }
@@ -63,7 +70,7 @@ def construct_inserts_for_fixture(fixture):
     for tablename, objs in fixture.items():
         return construct_insert_with_children(
             tablename,
-            objs[0],
+            objs,
         )
 
 def cast_from_pg_type(column, value, cur):
@@ -74,57 +81,61 @@ INSERT_WITH_CHILDREN_TMPL = mako.template.Template(
     strict_undefined=True,
 )
 
-def construct_insert_with_children(tablename, obj):
+def construct_insert_with_children(tablename, objs):
     # Annoyingly, mogrify is only available from a cursor instance.
     cur = engines.testing_engine.raw_connection().cursor()
 
     parent_table = tables.metadata.tables[tablename]
-    obj, children = partition_own_properties_and_children(obj)
-    parent_cols = obj.keys()
 
-    for k, v in obj.items():
-        column = parent_table.columns[k]
-        obj[k] = cast_from_pg_type(column, v, cur)
+    parents = []
+    for obj in objs:
+        obj, children = partition_own_properties_and_children(obj)
+        parent_cols = obj.keys()
 
-    parent_pk = [x.name for x in parent_table.primary_key]
-    parent_values = [tuple(obj.values())]
+        for k, v in obj.items():
+            column = parent_table.columns[k]
+            obj[k] = cast_from_pg_type(column, v, cur)
 
-    cte_values = None
-    cte_cols = None
-    cte_alias = None
-    child_table = None
-    for tablename, objs in children.items():
-        child_table = tablename
-        table = tables.metadata.tables[tablename]
+        parent_pk = [x.name for x in parent_table.primary_key]
+        parent_values = [tuple(obj.values())]
 
-        ## Construct the VALUES CTE
-        cte_alias = "new_{0}s".format(tablename)
-        cte_cols = objs[0].keys()
+        cte_values = None
+        cte_cols = None
+        child_table = None
+        for tablename, objs in children.items():
+            child_table = tablename
+            table = tables.metadata.tables[tablename]
 
-        # Cast types
-        for obj in objs:
-            for k, v in obj.items():
-                column = table.columns[k]
-                obj[k] = cast_from_pg_type(column, v, cur)
-        cte_values = [tuple(x.values()) for x in objs]
+            ## Construct the VALUES CTE
+            cte_cols = objs[0].keys()
 
-        # Construct the INSERT INTO from sub-select
-        child_cols = tuple(parent_pk + cte_cols)
+            # Cast types
+            for obj in objs:
+                for k, v in obj.items():
+                    column = table.columns[k]
+                    obj[k] = cast_from_pg_type(column, v, cur)
+            cte_values = [tuple(x.values()) for x in objs]
 
-    def mogrify(args):
-        markers = '\n,'.join(['%s'] * len(args))
-        return cur.mogrify(markers, args)
+            # Construct the INSERT INTO from sub-select
+            child_cols = tuple(parent_pk + cte_cols)
+
+        def mogrify(args):
+            markers = '\n,'.join(['%s'] * len(args))
+            return cur.mogrify(markers, args)
+
+        parents.append({
+            'parent_table': parent_table,
+            'parent_cols': parent_cols,
+            'parent_values': parent_values,
+            'parent_pk': parent_pk,
+            'cte_cols': cte_cols,
+            'cte_values': cte_values,
+            'child_table': child_table,
+            'child_cols': child_cols,
+        })
 
     ctx = {
-        'parent_table': parent_table,
-        'parent_cols': parent_cols,
-        'parent_values': parent_values,
-        'parent_pk': parent_pk,
-        'cte_alias': cte_alias,
-        'cte_cols': cte_cols,
-        'cte_values': cte_values,
-        'child_table': child_table,
-        'child_cols': child_cols,
+        'parents': parents,
         'comma_join': lambda x: ','.join(x),
         'mogrify': mogrify,
     }
@@ -143,17 +154,20 @@ def test_insert():
         insert_account_with_projects(conn)
         result = conn.execute(
 '''
-SELECT account_name, latest_project_time::text FROM account_latest_project_time
+SELECT account_name, latest_project_time::text
+FROM account_latest_project_time
 '''
     )
         trans.rollback()
     # We expect the DB to have timezone = 'UTC' in postgresql.conf,
     # therefore the conversion to string will have this +00 offset.
     assert list(result) == [
-        ("antonioni", '1962-10-19 23:59:33+00')]
+        ("fellini", '1963-10-19 23:59:33+00'),
+        ("antonioni", '1962-10-19 23:59:33+00'),
+    ]
 
 #Create lots of dupe tests for nose to run
-for x in xrange(9998):
+for x in xrange(998):
     vars()['test{0}'.format(x)] = test_insert
 
 def test_transaction_rollback():
