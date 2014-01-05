@@ -12,12 +12,11 @@ import tables
 def setup_module():
     """Create the database and all tables."""
     try:
-        engines.standard_engine.execute('CREATE DATABASE sql_views_testing');
-    # If an error was made that caused connections not to be closed the last
-    # time tests were run, the DB would not be dropped by the teardown.
-    # In that case, we drop it before re-creating.
-    except sqlalchemy.exc.ProgrammingError:
-        engines.standard_engine.execute('DROP DATABASE sql_views_testing');
+        # Check if DB is already created (saves about 500ms if so),
+        # and drop and recreate the public schema if so (start from scratch).
+        engines.testing_engine.execute('DROP SCHEMA IF EXISTS public CASCADE')
+        engines.testing_engine.execute('CREATE SCHEMA public')
+    except sqlalchemy.exc.OperationalError:
         engines.standard_engine.execute('CREATE DATABASE sql_views_testing');
 
     # Create tables
@@ -29,11 +28,6 @@ def setup_module():
         '../sql/latest_project.sql')
     with open(sql_module) as f:
         engines.testing_engine.execute(f.read())
-
-def teardown_module():
-    """Shutdown the pool and drop the database."""
-    engines.testing_engine.dispose()
-    engines.standard_engine.execute('DROP DATABASE sql_views_testing');
 
 def get_test_fixture():
     return {
@@ -55,7 +49,10 @@ def get_test_fixture():
           'project': [
             {'name': 'la dulce vita', 'time_start': '1960-10-19 23:59:33+00'},
             {'name': 'otto e mezzo', 'time_start': '1963-10-19 23:59:33+00'},
-          ]
+          ],
+          'member': [
+              {'name': 'masina'},
+          ],
         }
       ]
     }
