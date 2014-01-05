@@ -29,7 +29,7 @@ def setup_module():
     with open(sql_module) as f:
         engines.testing_engine.execute(f.read())
 
-def get_test_fixture():
+def get_test_fixture1():
     return {
       'account': [
         {
@@ -56,6 +56,22 @@ def get_test_fixture():
         }
       ]
     }
+
+def get_test_fixture2():
+    return {
+      'person': [
+        {'name': 'antonioni'},
+        {'name': 'vitti'},
+      ],
+      'relation': [
+        {
+          'person1': 'vitti',
+          'person2': 'antonioni',
+          'nature_relation': 'love',
+        },
+      ]
+    }
+
 
 def partition_own_properties_and_children(dict_):
     own_properties = {}
@@ -146,10 +162,37 @@ def construct_insert_with_children(tablename, objs):
 
     return insert_with_children
 
+def test_m2m_insert():
+    fix = get_test_fixture2()
+    intersections = fix['relation']
+    table = tables.metadata.tables['relation']
+    for intersection in intersections:
+        for k, v in intersection.items():
+            target = table.info['natural_fks'].get(k)
+            if target:
+                fk = [x for x in table.c.person1_id.foreign_keys][0]
+                target_column = fk.column.name
+                parent_table = fk.column.table
+                parent_real_key = parent_table.info['natural_key']
+                print(
+                    "{0}={1} is natural fk to {2} on {3}, "
+                    "{4} is surrogate fk to {5} on {6}"
+                    .format(
+                        k,
+                        v,
+                        parent_real_key,
+                        parent_table,
+                        target,
+                        target_column,
+                        parent_table,
+                    ))
+            else:
+                target = table.columns[k].name
+                print("{0}={1}".format(target, v))
 
 def insert_account_with_projects(conn):
         conn.execute(
-            construct_inserts_for_fixture(get_test_fixture()))
+            construct_inserts_for_fixture(get_test_fixture1()))
 
 def test_insert():
     with engines.testing_engine.connect() as conn:
