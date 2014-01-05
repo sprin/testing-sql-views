@@ -39,18 +39,22 @@ def get_test_fixture():
     return {
       'account': [
         {
-          'account_name': 'antonioni',
+          'name': 'antonioni',
           'project': [
-            {'project_name': 'l''avventura', 'time_start': '1960-10-19 23:59:33+00'},
-            {'project_name': 'la notte', 'time_start': '1961-10-19 23:59:33+00'},
-            {'project_name': 'l''eclisse', 'time_start': '1962-10-19 23:59:33+00'},
-          ]
+            {'name': 'l''avventura', 'time_start': '1960-10-19 23:59:33+00'},
+            {'name': 'la notte', 'time_start': '1961-10-19 23:59:33+00'},
+            {'name': 'l''eclisse', 'time_start': '1962-10-19 23:59:33+00'},
+          ],
+          'member': [
+              {'name': 'vitti'},
+              {'name': 'mastroianni'},
+          ],
         },
         {
-          'account_name': 'fellini',
+          'name': 'fellini',
           'project': [
-            {'project_name': 'la dulce vita', 'time_start': '1960-10-19 23:59:33+00'},
-            {'project_name': 'otto e mezzo', 'time_start': '1963-10-19 23:59:33+00'},
+            {'name': 'la dulce vita', 'time_start': '1960-10-19 23:59:33+00'},
+            {'name': 'otto e mezzo', 'time_start': '1963-10-19 23:59:33+00'},
           ]
         }
       ]
@@ -99,9 +103,7 @@ def construct_insert_with_children(tablename, objs):
         parent_pk = [x.name for x in parent_table.primary_key]
         parent_values = [tuple(obj.values())]
 
-        cte_values = None
-        cte_cols = None
-        child_table = None
+        all_children = []
         for tablename, objs in children.items():
             child_table = tablename
             table = tables.metadata.tables[tablename]
@@ -118,6 +120,13 @@ def construct_insert_with_children(tablename, objs):
 
             # Construct the INSERT INTO from sub-select
             child_cols = tuple(parent_pk + cte_cols)
+            child_ctx = {
+                'child_table': child_table,
+                'child_cols': child_cols,
+                'cte_cols': cte_cols,
+                'cte_values': cte_values,
+            }
+            all_children.append(child_ctx)
 
         def mogrify(args):
             markers = '\n,'.join(['%s'] * len(args))
@@ -128,10 +137,7 @@ def construct_insert_with_children(tablename, objs):
             'parent_cols': parent_cols,
             'parent_values': parent_values,
             'parent_pk': parent_pk,
-            'cte_cols': cte_cols,
-            'cte_values': cte_values,
-            'child_table': child_table,
-            'child_cols': child_cols,
+            'all_children': all_children,
         })
 
     ctx = {
@@ -154,7 +160,7 @@ def test_insert():
         insert_account_with_projects(conn)
         result = conn.execute(
 '''
-SELECT account_name, latest_project_time::text
+SELECT name, latest_project_time::text
 FROM account_latest_project_time
 '''
     )
