@@ -8,7 +8,9 @@ from sqlalchemy import (
     ForeignKey,
 )
 
-metadata = MetaData()
+import engines
+
+metadata = MetaData(bind=engines.engine)
 
 account = Table('account', metadata,
     Column('account_id', Integer, primary_key = True),
@@ -22,3 +24,9 @@ project = Table('project', metadata,
     Column('time_start', DateTime(timezone=True)),
 )
 
+import psycopg2.extensions
+typecasters = {
+    'INTEGER': psycopg2.extensions.INTEGER,
+    'VARCHAR': lambda x, y: x,
+    'DATETIME': psycopg2.extensions.PYDATETIME,
+}
