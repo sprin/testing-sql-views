@@ -1,5 +1,6 @@
 import os
 
+import mako.template
 import sqlalchemy
 import sqlalchemy.sql.expression
 import app
@@ -68,75 +69,67 @@ def construct_inserts_for_fixture(fixture):
 def cast_from_pg_type(column, value, cur):
     return tables.typecasters[str(column.type)](value, cur)
 
+INSERT_WITH_CHILDREN_TMPL = mako.template.Template(
+    open('templates/insert_with_children.sql').read(),
+    strict_undefined=True,
+)
 
 def construct_insert_with_children(tablename, obj):
     # Annoyingly, mogrify is only available from a cursor instance.
     cur = engines.testing_engine.raw_connection().cursor()
 
-    table = tables.metadata.tables[tablename]
+    parent_table = tables.metadata.tables[tablename]
     obj, children = partition_own_properties_and_children(obj)
+    parent_cols = obj.keys()
 
     for k, v in obj.items():
-        column = table.columns[k]
+        column = parent_table.columns[k]
         obj[k] = cast_from_pg_type(column, v, cur)
 
-    parent_pkey = [x.name for x in table.primary_key]
-    fmt = (
-"""
-INSERT INTO {tablename}({cols}) VALUES %s
-RETURNING {parent_pkey}
-"""
-    .format(
-        tablename = tablename,
-        cols = ','.join(obj.keys()),
-        parent_pkey = ','.join(parent_pkey),
-    ))
-    parent_insert = cur.mogrify(fmt, [tuple(obj.values())])
+    parent_pk = [x.name for x in parent_table.primary_key]
+    parent_values = [tuple(obj.values())]
 
-    child_inserts = []
+    cte_values = None
+    cte_cols = None
+    cte_alias = None
+    child_table = None
     for tablename, objs in children.items():
+        child_table = tablename
         table = tables.metadata.tables[tablename]
 
         ## Construct the VALUES CTE
         cte_alias = "new_{0}s".format(tablename)
         cte_cols = objs[0].keys()
-        fmt = ", {cte_alias}({cols}) AS (VALUES {markers})".format(
-            cte_alias = cte_alias,
-            cols = ','.join(cte_cols),
-            markers = '\n,'.join(['%s'] * len(objs))
-        )
 
         # Cast types
         for obj in objs:
             for k, v in obj.items():
                 column = table.columns[k]
                 obj[k] = cast_from_pg_type(column, v, cur)
-
-        values_cte = cur.mogrify(fmt, [tuple(x.values()) for x in objs])
+        cte_values = [tuple(x.values()) for x in objs]
 
         # Construct the INSERT INTO from sub-select
-        col_list = tuple(parent_pkey + cte_cols)
-        child_insert_str = (
-"""
-{values_cte}
-INSERT INTO {tablename}({cols})
-SELECT {cols}
-FROM parent, {cte_alias}
-"""
-            .format(
-                values_cte = values_cte,
-                tablename = tablename,
-                cols = ','.join(col_list),
-                cte_alias = cte_alias,
-        ))
+        child_cols = tuple(parent_pk + cte_cols)
 
-        child_inserts.append(child_insert_str)
-    insert_with_children = (
-        'WITH parent AS ({parent_insert}){child_inserts}'
-        .format(
-            parent_insert = parent_insert,
-            child_inserts = '\n'.join(child_inserts)
-        ))
+    def mogrify(args):
+        markers = '\n,'.join(['%s'] * len(args))
+        return cur.mogrify(markers, args)
+
+    ctx = {
+        'parent_table': parent_table,
+        'parent_cols': parent_cols,
+        'parent_values': parent_values,
+        'parent_pk': parent_pk,
+        'cte_alias': cte_alias,
+        'cte_cols': cte_cols,
+        'cte_values': cte_values,
+        'child_table': child_table,
+        'child_cols': child_cols,
+        'comma_join': lambda x: ','.join(x),
+        'mogrify': mogrify,
+    }
+    insert_with_children = INSERT_WITH_CHILDREN_TMPL.render(**ctx)
+
     return insert_with_children
 
 
@@ -160,7 +153,7 @@ SELECT account_name, latest_project_time::text FROM account_latest_project_time
         ("antonioni", '1962-10-19 23:59:33+00')]
 
 #Create lots of dupe tests for nose to run
-for x in xrange(998):
+for x in xrange(9998):
     vars()['test{0}'.format(x)] = test_insert
 
 def test_transaction_rollback():
