@@ -53,7 +53,12 @@ test_fixture1 = {
           {'name': 'masina'},
       ],
     }
-  ]
+  ],
+  'locale': [
+    {'name': 'beach'},
+    {'name': 'ruins'},
+    {'name': 'garden'},
+  ],
 }
 
 test_fixture2 = {
@@ -113,59 +118,53 @@ def mogrify(args, cur):
     markers = '\n,'.join(['%s'] * len(args))
     return cur.mogrify(markers, args)
 
-def construct_inserts_for_fixture(fixture):
-    for tablename, objs in fixture.items():
-        return construct_insert_str_with_children(
-            tablename,
-            objs,
-        )
-
 INSERT_WITH_CHILDREN_TMPL = mako.template.Template(
     open('templates/insert_with_children.sql').read(),
     strict_undefined=True,
 )
 
-def construct_insert_str_with_children(tablename, objs):
+def construct_insert_str_with_children(fixture):
     # We need a cursor in order to type-cast and mogrify.
     cur = engines.testing_engine.raw_connection().cursor()
-    ctx = get_insert_ctx_with_children(tablename, objs, cur)
+    ctx = get_insert_ctx_with_children(fixture, cur)
     ctx.update({
         'comma_join': lambda x: ','.join(x),
         'mogrify': lambda x: mogrify(x, cur)
     })
     return INSERT_WITH_CHILDREN_TMPL.render(**ctx)
 
-def get_insert_ctx_with_children(tablename, objs, cur):
-
-    parent_table = tables.metadata.tables[tablename]
+def get_insert_ctx_with_children(fixture, cur):
 
     parents = []
-    for obj in objs:
+    for parent_tablename, objs in fixture.items():
+        parent_table = tables.metadata.tables[parent_tablename]
 
-        # We split the obj dict into the objects own attributes,
-        # and it's lists of child objects.
-        obj, children = partition_own_attrs_and_children(obj)
+        for obj in objs:
 
-        parent_ctx = get_insert_context([obj], parent_table, cur)
-        parent_pk = parent_ctx['pk']
+            # We split the obj dict into the objects own attributes,
+            # and it's lists of child objects.
+            obj, children = partition_own_attrs_and_children(obj)
 
-        all_children = []
-        for child_tablename, objs in children.items():
-            child_table = tables.metadata.tables[child_tablename]
+            parent_ctx = get_insert_context([obj], parent_table, cur)
+            parent_pk = parent_ctx['pk']
 
-            ## Construct context for VALUES CTE
-            child_ctx = get_insert_context(objs, child_table, cur)
+            all_children = []
+            for child_tablename, objs in children.items():
+                child_table = tables.metadata.tables[child_tablename]
 
-            # The INSERT statement joins on the VALUES CTE and
-            # the parent table. We need to add the parent PK to the col list.
-            child_ctx['insert_cols'] = (
-                tuple(parent_pk + child_ctx['values_cols']))
+                ## Construct context for VALUES CTE
+                child_ctx = get_insert_context(objs, child_table, cur)
 
-            all_children.append(child_ctx)
+                # The INSERT statement joins on the VALUES CTE and
+                # the parent table. We need to add the parent PK to the col list.
+                child_ctx['insert_cols'] = (
+                    tuple(parent_pk + child_ctx['values_cols']))
 
-        parent_ctx['all_children'] = all_children
+                all_children.append(child_ctx)
 
-        parents.append(parent_ctx)
+            parent_ctx['all_children'] = all_children
+
+            parents.append(parent_ctx)
 
     return {'parents': parents}
 
@@ -199,7 +198,7 @@ def test_m2m_insert():
 
 def insert_account_with_projects(conn):
         conn.execute(
-            construct_inserts_for_fixture(test_fixture1))
+            construct_insert_str_with_children(test_fixture1))
 
 def test_insert():
     with engines.testing_engine.connect() as conn:

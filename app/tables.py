@@ -33,6 +33,12 @@ member = Table('member', metadata,
     info = {'natural_key': 'name'}
 )
 
+locale = Table('locale', metadata,
+    Column('locale_id', Integer, primary_key = True),
+    Column('name', String),
+    info = {'natural_key': 'name'}
+)
+
 person = Table('person', metadata,
     Column('person_id', Integer, primary_key = True),
     Column('name', String),
