@@ -1,11 +1,12 @@
+import collections
 import os
 
 import mako.template
 import sqlalchemy
 import sqlalchemy.sql.expression
+
 import app
 app.app.config['TESTING'] = True
-
 import engines
 import tables
 
@@ -61,19 +62,6 @@ test_fixture1 = {
   ],
 }
 
-test_fixture2 = {
-  'person': [
-    {'name': 'antonioni'},
-    {'name': 'vitti'},
-  ],
-  'relation': [
-    {
-      'person1': 'vitti',
-      'person2': 'antonioni',
-      'nature_relation': 'love',
-    },
-  ]
-}
 
 
 def partition_own_attrs_and_children(dict_):
@@ -114,8 +102,21 @@ def get_insert_context(objs, table_obj, cur):
         'pk': pk,
     }
 
+def get_insert_values(objs, table_obj, cur, natural_fk=None):
+    """
+    Get the INSERT context for a single set of objects in the same table_obj,
+    assuming they only have attributes referring to their own table_obj.
+    """
+    values = []
+    for obj in objs:
+        val_tup = get_pg_type_values_tup(obj, table_obj, cur)
+        if natural_fk:
+            val_tup = (natural_fk,) + val_tup
+        values.append(val_tup)
+    return values
+
 def mogrify(args, cur):
-    markers = '\n,'.join(['%s'] * len(args))
+    markers = '\n\t,'.join(['%s'] * len(args))
     return cur.mogrify(markers, args)
 
 INSERT_WITH_CHILDREN_TMPL = mako.template.Template(
@@ -123,21 +124,79 @@ INSERT_WITH_CHILDREN_TMPL = mako.template.Template(
     strict_undefined=True,
 )
 
+def get_insert_order(deps, insert_order=None):
+    """
+    We're in for some trouble if there are circular deps.
+    """
+    insert_order = []
+    dep_list = [(t, p) for t, p in deps.items()]
+    for tablename, parents in dep_list:
+        # If all parents are already ordered, add this to the ordered list.
+        if not [p for p in parents if p not in insert_order]:
+            insert_order.append(tablename)
+        else:
+            # Otherwise, add tuple to end of list, so we check it again.
+            dep_list.append((tablename, parents))
+    return insert_order
+
+def get_ordered_record_list(record_cache, insert_order):
+    ordered = []
+    for tablename in insert_order:
+        records = record_cache[tablename]
+        # Put tablename inside of records object, since we are now
+        # using a list, instead of a dict.
+        records['tablename'] = tablename
+        ordered.append(records)
+    return ordered
+
+def annotate_with_join_info(records_list):
+    for records in records_list:
+        tablename = records['tablename']
+        natural_joins = tables.metadata.tables[tablename].info.get('natural_joins')
+        if not natural_joins:
+            continue
+
+        records['natural_joins'] = []
+        for col in records['value_cols']:
+            natural_join = natural_joins.get(col)
+            if natural_join:
+                records['natural_joins'].append(natural_join)
+
+def comma_join(seq, prefix=''):
+    if prefix:
+        return ', '.join([prefix+'.'+x for x in seq])
+    else:
+        return ', '.join(seq)
+
+
+
 def construct_insert_str_with_children(fixture):
     # We need a cursor in order to type-cast and mogrify.
     cur = engines.testing_engine.raw_connection().cursor()
-    ctx = get_insert_ctx_with_children(fixture, cur)
-    ctx.update({
-        'comma_join': lambda x: ','.join(x),
+    record_cache = get_record_cache(fixture, cur)
+
+    deps = dict([(k, v['parent_tablenames']) for k, v in record_cache.items()])
+    insert_order = get_insert_order(deps)
+    ordered_records = get_ordered_record_list(record_cache, insert_order)
+    annotate_with_join_info(ordered_records)
+    ctx = {
+        'records': ordered_records,
+        'comma_join': comma_join,
         'mogrify': lambda x: mogrify(x, cur)
-    })
+    }
     return INSERT_WITH_CHILDREN_TMPL.render(**ctx)
 
-def get_insert_ctx_with_children(fixture, cur):
+def get_record_cache(fixture, cur):
 
-    parents = []
+    record_cache = collections.defaultdict(lambda: {
+        'value_cols': None,
+        'values': [],
+        'parent_tablenames': set([]),
+    })
     for parent_tablename, objs in fixture.items():
         parent_table = tables.metadata.tables[parent_tablename]
+
+        parent_natural_key = parent_table.info['natural_key']
 
         for obj in objs:
 
@@ -145,60 +204,50 @@ def get_insert_ctx_with_children(fixture, cur):
             # and it's lists of child objects.
             obj, children = partition_own_attrs_and_children(obj)
 
-            parent_ctx = get_insert_context([obj], parent_table, cur)
-            parent_pk = parent_ctx['pk']
+            parent_cols = tuple(objs[0].keys())
+            record_cache[parent_tablename]['value_cols'] = parent_cols
+            record_cache[parent_tablename]['values'].extend(
+                get_insert_values([obj], parent_table, cur))
 
-            all_children = []
+            parent_natural_fk_val = obj[parent_natural_key]
+
             for child_tablename, objs in children.items():
                 child_table = tables.metadata.tables[child_tablename]
 
                 ## Construct context for VALUES CTE
-                child_ctx = get_insert_context(objs, child_table, cur)
+                record_cache[child_tablename]['parent_tablenames'].add(
+                    parent_tablename)
+                natural_fk = child_table.info['fk_reversed'][parent_natural_key]
+                child_cols = tuple(objs[0].keys())
+                value_cols = (natural_fk,) + child_cols
+                record_cache[child_tablename]['value_cols'] = value_cols
+                record_cache[child_tablename]['insert_cols'] = child_cols
 
-                # The INSERT statement joins on the VALUES CTE and
-                # the parent table. We need to add the parent PK to the col list.
-                child_ctx['insert_cols'] = (
-                    tuple(parent_pk + child_ctx['values_cols']))
+                record_cache[child_tablename]['values'].extend(
+                    get_insert_values(objs, child_table, cur,
+                                      parent_natural_fk_val))
 
-                all_children.append(child_ctx)
+    return record_cache
 
-            parent_ctx['all_children'] = all_children
+test_fixture2 = {
+  'person': [
+    {'name': 'antonioni'},
+    {'name': 'vitti'},
+  ],
+  'relation': [
+    {
+      'person1_name': 'vitti',
+      'person2_name': 'antonioni',
+      'nature_relation': 'love',
+    },
+  ]
+}
 
-            parents.append(parent_ctx)
 
-    return {'parents': parents}
-
-def test_m2m_insert():
-    fix = test_fixture2
-    intersections = fix['relation']
-    table = tables.metadata.tables['relation']
-    for intersection in intersections:
-        for k, v in intersection.items():
-            target = table.info['natural_fks'].get(k)
-            if target:
-                fk = [x for x in table.c.person1_id.foreign_keys][0]
-                target_column = fk.column.name
-                parent_table = fk.column.table
-                parent_real_key = parent_table.info['natural_key']
-                print(
-                    "{0}={1} is natural fk to {2} on {3}, "
-                    "{4} is surrogate fk to {5} on {6}"
-                    .format(
-                        k,
-                        v,
-                        parent_real_key,
-                        parent_table,
-                        target,
-                        target_column,
-                        parent_table,
-                    ))
-            else:
-                target = table.columns[k].name
-                print("{0}={1}".format(target, v))
 
 def insert_account_with_projects(conn):
-        conn.execute(
-            construct_insert_str_with_children(test_fixture1))
+    conn.execute(
+        construct_insert_str_with_children(test_fixture1))
 
 def test_insert():
     with engines.testing_engine.connect() as conn:
