@@ -40,8 +40,12 @@ test_fixture1 = {
         {'name': 'l''eclisse', 'time_start': '1962-10-19 23:59:33+00'},
       ],
       'member': [
-          {'name': 'vitti'},
-          {'name': 'mastroianni'},
+        {'name': 'mastroianni'},
+        {'name': 'vitti',
+          'cat': [
+             {'name': 'statua'}
+           ],
+        },
       ],
     },
     {
@@ -56,9 +60,9 @@ test_fixture1 = {
     }
   ],
   'locale': [
-    {'name': 'beach'},
-    {'name': 'ruins'},
-    {'name': 'garden'},
+    {'name': 'la spiaggia'},
+    {'name': 'le rovine'},
+    {'name': 'giardino'},
   ],
 }
 
@@ -102,18 +106,14 @@ def get_insert_context(objs, table_obj, cur):
         'pk': pk,
     }
 
-def get_insert_values(objs, table_obj, cur, natural_fk=None):
+def get_insert_values(obj, table_obj, cur, natural_fk=None):
     """
-    Get the INSERT context for a single set of objects in the same table_obj,
-    assuming they only have attributes referring to their own table_obj.
+    Get the INSERT context for a single object.
     """
-    values = []
-    for obj in objs:
-        val_tup = get_pg_type_values_tup(obj, table_obj, cur)
-        if natural_fk:
-            val_tup = (natural_fk,) + val_tup
-        values.append(val_tup)
-    return values
+    val_tup = get_pg_type_values_tup(obj, table_obj, cur)
+    if natural_fk:
+        val_tup = (natural_fk,) + val_tup
+    return val_tup
 
 def mogrify(args, cur):
     markers = '\n\t,'.join(['%s'] * len(args))
@@ -193,39 +193,48 @@ def get_record_cache(fixture, cur):
         'values': [],
         'parent_tablenames': set([]),
     })
-    for parent_tablename, objs in fixture.items():
-        parent_table = tables.metadata.tables[parent_tablename]
 
-        parent_natural_key = parent_table.info['natural_key']
+    tables_meta = tables.metadata.tables
 
-        for obj in objs:
+    def get_records_cache_inner(fixture, parent_tname=None,
+                                parent_natural_fk_val=None):
 
-            # We split the obj dict into the objects own attributes,
-            # and it's lists of child objects.
-            obj, children = partition_own_attrs_and_children(obj)
+        if parent_tname:
+            parent_natural_key = (tables_meta[parent_tname].info['natural_key'])
 
-            parent_cols = tuple(objs[0].keys())
-            record_cache[parent_tablename]['value_cols'] = parent_cols
-            record_cache[parent_tablename]['values'].extend(
-                get_insert_values([obj], parent_table, cur))
+        for tname, objs in fixture.items():
+            table = tables_meta[tname]
 
-            parent_natural_fk_val = obj[parent_natural_key]
+            obj, children = partition_own_attrs_and_children(objs[0])
+            cols = tuple(obj.keys())
 
-            for child_tablename, objs in children.items():
-                child_table = tables.metadata.tables[child_tablename]
+            if parent_tname:
+                natural_fk = table.info['fk_reversed'][parent_natural_key]
+                value_cols = (natural_fk,) + cols
+            else:
+                value_cols = cols
+
+            for obj in objs:
+
+                # We split the obj dict into the objects own attributes,
+                # and it's lists of child objects.
+                obj, children = partition_own_attrs_and_children(obj)
 
                 ## Construct context for VALUES CTE
-                record_cache[child_tablename]['parent_tablenames'].add(
-                    parent_tablename)
-                natural_fk = child_table.info['fk_reversed'][parent_natural_key]
-                child_cols = tuple(objs[0].keys())
-                value_cols = (natural_fk,) + child_cols
-                record_cache[child_tablename]['value_cols'] = value_cols
-                record_cache[child_tablename]['insert_cols'] = child_cols
+                if parent_tname:
+                    record_cache[tname]['parent_tablenames'].add(parent_tname)
+                record_cache[tname]['value_cols'] = value_cols
+                record_cache[tname]['insert_cols'] = cols
 
-                record_cache[child_tablename]['values'].extend(
-                    get_insert_values(objs, child_table, cur,
+                record_cache[tname]['values'].append(
+                    get_insert_values(obj, table, cur,
                                       parent_natural_fk_val))
+
+                # Prepare for recursive call
+                natural_fk_val = obj[table.info['natural_key']]
+                get_records_cache_inner(children, tname, natural_fk_val)
+
+    get_records_cache_inner(fixture)
 
     return record_cache
 
@@ -246,8 +255,8 @@ test_fixture2 = {
 
 
 def insert_account_with_projects(conn):
-    conn.execute(
-        construct_insert_str_with_children(test_fixture1))
+    insert_stmt = construct_insert_str_with_children(test_fixture1)
+    conn.execute(insert_stmt)
 
 def test_insert():
     with engines.testing_engine.connect() as conn:

@@ -46,6 +46,16 @@ member = Table('member', metadata,
     }
 )
 
+cat = Table('cat', metadata,
+    Column('cat_id', Integer, primary_key = True),
+    Column('member_id', ForeignKey("member.member_id"), nullable=False),
+    Column('name', String),
+    info = {
+        'natural_key': 'name',
+        'natural_fks': {'member_name': 'member_id'}
+    }
+)
+
 locale = Table('locale', metadata,
     Column('locale_id', Integer, primary_key = True),
     Column('name', String),
