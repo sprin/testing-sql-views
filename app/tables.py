@@ -95,12 +95,14 @@ def extend_metadata():
             for natural_fk, surrogate_fk in natural_fks.items():
                 fk = [x for x in table.columns[surrogate_fk].foreign_keys][0]
                 parent_table = fk.column.table
+                parent_pk = [x.name for x in parent_table.primary_key][0]
                 parent_natural_key = parent_table.info['natural_key']
                 table.info['natural_joins'][natural_fk] = {
                     'natural_fk': natural_fk,
                     'surrogate_fk': surrogate_fk,
                     'parent_table': parent_table.name,
                     'parent_natural_key': parent_natural_key,
+                    'parent_pk': parent_pk,
                 }
                 # Build a map of reversed natural keys, for the
                 # case where there is only one possible

@@ -24,9 +24,9 @@ WITH ${o['tablename']}_insert AS (
 % for j in o['natural_joins']:
 	JOIN ${j['parent_table']}_insert p${loop.index}
 	ON v.${j['natural_fk']} = p${loop.index}.${j['parent_natural_key']}
+% endfor
 	RETURNING *
 )
-% endfor
 %endif
 </%def>\
 \
@@ -38,6 +38,6 @@ ${j['surrogate_fk']}, \
 \
 <%def name="join_parent_pks(natural_joins)">\
 % for j in natural_joins:
-p${loop.index}.${j['surrogate_fk']}, \
+p${loop.index}.${j['parent_pk']}, \
 % endfor
 </%def>\
